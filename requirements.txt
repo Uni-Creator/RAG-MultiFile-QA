@@ -1,0 +1,14 @@
+streamlit
+langchain
+langchain-community
+langchain-huggingface
+langchain-text-splitters
+huggingface_hub
+PyMuPDF
+pdfplumber
+python-docx
+pandas
+numpy
+torch
+faiss-cpu
+unstructured
