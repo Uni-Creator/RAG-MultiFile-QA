@@ -36,7 +36,7 @@ This project is a **Streamlit-based Q&A application** that allows users to uploa
    ```
 4. Run the app:
    ```sh
-   streamlit run app.py
+   streamlit run main.py
    ```
 
 ## 📌 Notes
