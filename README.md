@@ -1,5 +1,6 @@
 # RAG-MultiFile-QA
 ![GitHub Repo stars](https://img.shields.io/github/stars/Uni-Creator/RAG-MultiFile-QA?style=social)  ![GitHub forks](https://img.shields.io/github/forks/Uni-Creator/RAG-MultiFile-QA?style=social)
+
 📚 **Multi-File Retrieval-Augmented Generation (RAG) Q&A System**
 
 This project is a **Streamlit-based Q&A application** that allows users to upload multiple document types (**PDF, DOCX, TXT, CSV**) and ask questions about their content using **retrieval-augmented generation (RAG)**.
