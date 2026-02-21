@@ -1,12 +1,12 @@
 streamlit
 langchain==0.2.14
 langchain-community
-langchain-huggingface
 langchain-text-splitters
 sentence-transformers==2.7.0
 faiss-cpu
 transformers==4.41.2
-huggingface-hub==0.23.5
+huggingface-hub>=0.24.0
+langchain-huggingface>=0.0.6
 pypdf
 python-docx
 pandas
