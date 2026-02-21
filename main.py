@@ -1,5 +1,6 @@
 # Import Langchain dependencies
-from langchain_community.document_loaders import PyPDFLoader, TextLoader, UnstructuredWordDocumentLoader, CSVLoader
+from langchain_community.document_loaders import PyPDFLoader, TextLoader, CSVLoader
+from langchain_community.document_loaders import Docx2txtLoader
 from langchain_community.vectorstores import FAISS
 from langchain_core.runnables import RunnablePassthrough
 from langchain_community.embeddings import HuggingFaceEmbeddings
@@ -17,14 +18,17 @@ from dotenv import load_dotenv
 load_dotenv()
 
 # Load API key
-api_key = os.getenv("HUGGINGFACE_HUB_TOKEN")
-if not api_key:
-    st.error("API key not found. Please set the 'HUGGINGFACE_HUB_TOKEN' in .env file.")
-    st.stop()
+api_key = None
+
+if "HUGGINGFACE_HUB_TOKEN" in st.secrets:
+    api_key = st.secrets["HUGGINGFACE_HUB_TOKEN"]
+else:
+    load_dotenv()
+    api_key = os.getenv("HUGGINGFACE_HUB_TOKEN")
 
 # Setup LLM using ChatHuggingFace wrapper
 llm_endpoint = HuggingFaceEndpoint(
-    repo_id="google/flan-t5-large",
+    repo_id="mistralai/Mistral-7B-Instruct-v0.2",
     huggingfacehub_api_token=api_key,
     task="conversational",
     max_new_tokens=512,
@@ -43,8 +47,12 @@ uploaded_files = st.file_uploader(
     accept_multiple_files=True
 )
 
+@st.cache_resource
+def get_embeddings():
+    return HuggingFaceEmbeddings(model_name="all-MiniLM-L6-v2")
+
 # Function to load and process multiple files
-@st.cache_resource(show_spinner=False)
+@st.cache_resource(show_spinner=True)
 def load_files(files):
     if not files:
         return None, []
@@ -64,7 +72,7 @@ def load_files(files):
             elif file.name.endswith(".txt"):
                 documents.extend(TextLoader(temp_path).load())
             elif file.name.endswith(".docx"):
-                documents.extend(UnstructuredWordDocumentLoader(temp_path).load())
+                documents.extend(Docx2txtLoader(temp_path).load())
             elif file.name.endswith(".csv"):
                 documents.extend(CSVLoader(temp_path).load())
         except Exception as e:
@@ -75,11 +83,11 @@ def load_files(files):
         return None, temp_files
 
     # Split documents
-    text_splitter = RecursiveCharacterTextSplitter(chunk_size=500, chunk_overlap=50)
+    text_splitter = RecursiveCharacterTextSplitter(chunk_size=800, chunk_overlap=100)
     split_docs = text_splitter.split_documents(documents)
 
-    # Create embeddings and vectorstore
-    embeddings = HuggingFaceEmbeddings(model_name="all-MiniLM-L6-v2")
+    # Create embeddings and vectorstore``
+    embeddings = get_embeddings()
     vectorstore = FAISS.from_documents(split_docs, embeddings)
 
     return vectorstore, temp_files
@@ -96,7 +104,7 @@ else:
 
 # Initialize Q&A chain if vectorstore is ready
 if vectorstore:
-    retriever = vectorstore.as_retriever(search_kwargs={"k": 4})
+    retriever = vectorstore.as_retriever(search_kwargs={"k": 3})
 
     # ChatPromptTemplate works better with ChatHuggingFace
     prompt_template = ChatPromptTemplate.from_template(
@@ -145,7 +153,6 @@ else:
 # Clear button
 if st.button("Clear All"):
     st.session_state.messages = []
-    uploaded_files = None
 
     for file_path in temp_files:
         try:

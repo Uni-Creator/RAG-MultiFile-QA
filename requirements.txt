@@ -11,3 +11,4 @@ pypdf
 python-docx
 pandas
 python-dotenv
+docx2txt
