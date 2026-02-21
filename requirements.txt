@@ -11,3 +11,4 @@ pypdf
 unstructured
 python-docx
 pandas
+dotenv
