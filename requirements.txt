@@ -1,13 +1,13 @@
 streamlit>=1.32
-langchain>=0.3
-langchain-community>=0.3
-langchain-text-splitters
-langchain-huggingface
-sentence-transformers
-faiss-cpu
-transformers
-huggingface-hub>=0.24
-pypdf
-docx2txt
+numpy
 pandas
+pypdf
+python-docx
+huggingface-hub>=0.24
+sentence-transformers>=3.0     # >=3 pulls a modern transformers/tokenizers with prebuilt wheels (no Rust needed)
+transformers>=4.40
+torchvision
+tokenizers>=0.19
+faiss-cpu
 python-dotenv
+pytest

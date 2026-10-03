@@ -14,5 +14,7 @@ venv/
 dist/
 build/
 .streamlit/
-chroma_db/
+data/
+logs/
+.pytest_cache/
 temp_backup/

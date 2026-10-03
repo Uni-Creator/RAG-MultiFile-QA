@@ -1,0 +1,31 @@
+{
+    "id": "q1",
+    "question": "How long is the warranty period?",
+    "expected_answer": "The warranty period is 24 months",
+    "answerable": true,
+    "relevant": [
+        {
+            "filename": "widgets.md",
+            "contains": "24 months",
+            "grade": 3
+        }
+    ]
+}
+{
+    "id": "q2",
+    "question": "How long does charging take?",
+    "expected_answer": "Charging takes about two hours",
+    "answerable": true,
+    "relevant": [
+        {
+            "filename": "widgets.md",
+            "contains": "two hours",
+            "grade": 3
+        }
+    ]
+}
+{
+    "id": "q3",
+    "question": "What is the capital of Mongolia?",
+    "answerable": false
+}
