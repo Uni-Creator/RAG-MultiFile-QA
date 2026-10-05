@@ -158,13 +158,10 @@ def redact_pii(text: str) -> tuple:
     return text, dict(counts)
 
 
-#  authn / authz
-def can_read(principal: Principal, meta: dict) -> bool:
-    """AuthZ: tenant must match; if the doc lists allowed_roles, caller needs one."""
-    if meta.get("tenant_id") != principal.tenant_id:
-        return False
-    allowed = meta.get("allowed_roles")
-    return not allowed or bool(set(allowed) & set(principal.roles))
+#  authn / authz (disabled / open access)
+def can_read(principal: Principal | None, meta: dict) -> bool:
+    """AuthZ bypassed: all documents are readable."""
+    return True
 
 
 class StaticTokenAuthenticator:

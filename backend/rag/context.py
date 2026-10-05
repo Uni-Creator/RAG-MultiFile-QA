@@ -42,8 +42,30 @@ class ContextBuilder:
         tr, cfg = current(), self.cfg
         with tr.span("context"):
             index = self.store.get(principal.tenant_id)
-            cands = [_Cand(index.child(h.chunk_id), index.vector(h.chunk_id), h.score)
-                     for h in hits if can_read(principal, index.child(h.chunk_id).meta)]  # ACL, defence in depth
+            # Also load system index so cross-tenant hits (HOW_TO_USE.md etc.) can be resolved
+            from .pipeline import SYSTEM_TENANT  # deferred import
+            system_index = self.store.get(SYSTEM_TENANT)
+
+            def _resolve(chunk_id: str):
+                """Return (child, vector, src_index) from whichever index holds this chunk."""
+                if chunk_id in index.row:
+                    return index.child(chunk_id), index.vector(chunk_id), index
+                if chunk_id in system_index.row:
+                    return system_index.child(chunk_id), system_index.vector(chunk_id), system_index
+                return None, None, None
+
+            cands = []
+            for h in hits:
+                child, vec, src_index = _resolve(h.chunk_id)
+                if child is None:
+                    continue
+                # ACL: user chunks need normal check; system chunks are always readable
+                if src_index is not system_index and not can_read(principal, child.meta):
+                    continue
+                c = _Cand(child, vec, h.score)
+                c._src_index = src_index  # stash for parent lookup
+                cands.append(c)
+
             n0 = len(cands)
             if not cands:
                 return ContextResult([], 0, budget_tokens)
@@ -54,7 +76,7 @@ class ContextBuilder:
             cands = self._dedup(cands)
             n_dedup = len(cands)
             cands = self._mmr(cands, cfg.max_context_items + (4 if wide else 0))
-            items = self._expand(index, cands)
+            items = self._expand_multi(system_index, cands)
             if not wide:
                 items = self._compress(items, plan)
             items, dropped = self._budget(items, budget_tokens)
@@ -99,12 +121,25 @@ class ContextBuilder:
 
     # ------------------------------------------------- 3. parent expansion
     def _expand(self, index, cands: list) -> list:
+        """Single-index expand (legacy path, kept for test compatibility)."""
+        for c in cands:
+            c._src_index = index  # ensure attribute exists
+        return self._expand_multi(index, cands)
+
+    def _expand_multi(self, system_index, cands: list) -> list:
+        """Expand to parents, routing each candidate to its originating index."""
         groups: dict = {}
         for c in cands:
             groups.setdefault(c.child.parent_id, []).append(c)
         items = []
         for pid, group in groups.items():
-            parent = index.parent(pid)
+            src_index = getattr(group[0], "_src_index", None)
+            if src_index is None or pid not in src_index.parents:
+                # fallback: try user index first, then system
+                src_index = system_index if pid in system_index.parents else src_index
+            if src_index is None or pid not in src_index.parents:
+                continue
+            parent = src_index.parent(pid)
             group.sort(key=lambda c: c.child.meta.get("chunk_index", 0))
             anchors = [c.child.text for c in group]
             text = parent.text if len(parent.text) <= self.cfg.expand_parent_max_chars else "\n…\n".join(anchors)

@@ -16,5 +16,8 @@ build/
 .streamlit/
 data/
 logs/
+backend/data/
+backend/logs/
+*.sqlite
 .pytest_cache/
 temp_backup/

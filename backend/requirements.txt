@@ -1,0 +1,13 @@
+# Backend core dependencies
+numpy
+pandas
+pypdf
+python-docx
+huggingface-hub>=0.24
+sentence-transformers>=3.0
+transformers>=4.40
+torchvision
+tokenizers>=0.19
+faiss-cpu
+python-dotenv
+pytest

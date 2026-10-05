@@ -6,14 +6,25 @@ from typing import Optional
 
 @dataclass(frozen=True)
 class Principal:
-    """Authenticated caller. tenant_id scopes the index; roles drive document ACLs."""
-    tenant_id: str
-    user_id: str
+    """Caller representation (auth disabled)."""
+    tenant_id: str = "default"
+    user_id: str = "user"
     roles: tuple = ("member",)
+
+    @property
+    def tenant(self) -> str:
+        return self.tenant_id
+
+    @property
+    def user(self) -> str:
+        return self.user_id
 
     @property
     def key(self) -> str:
         return f"{self.tenant_id}/{self.user_id}"
+
+
+DEFAULT_PRINCIPAL = Principal()
 
 
 @dataclass

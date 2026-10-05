@@ -1,55 +1,132 @@
-# Document Q&A: an end-to-end RAG pipeline
+# Document Q&A: End-to-End Multi-Tenant RAG Pipeline
 
 ```
 DATA → CHUNK → EMBED → INDEX → UNDERSTAND QUERY → RETRIEVE → FUSE → RERANK
      → BUILD CONTEXT → GENERATE → VERIFY → CITE → RESPOND
 ```
-Memory, caching, security, evaluation and observability wrap this chain.
+Memory, caching, security, evaluation, and observability wrap this pipeline.
 
-## Run
+---
 
+## 📁 Project Structure
+
+```
+RAG-MultiFile-QA/
+├── backend/
+│   ├── rag/                       # Core RAG engine modules
+│   │   ├── builtin/               # System built-in documents (HOW_TO_USE.md)
+│   │   ├── chunking.py            # Structure-aware parent-child chunker
+│   │   ├── ingestion.py           # Multi-format doc parsing & sanitizer
+│   │   ├── store.py               # FAISS dense + BM25 sparse hybrid index
+│   │   ├── query.py               # Intent classifier & query rewriter
+│   │   ├── retrieval.py           # Hybrid retrieval + RRF + Cross-Encoder reranker
+│   │   ├── context.py             # Context assembler & token budget optimizer
+│   │   ├── generation.py          # LLM generator with streaming gate
+│   │   ├── verification.py        # Claim-level NLI verifier & citation checker
+│   │   ├── memory.py              # Short-term / long-term memory management
+│   │   ├── cache.py               # SQLite-backed semantic & KV caching
+│   │   ├── security.py            # Injection detection, PII redaction, rate-limiter
+│   │   ├── evaluation.py          # Golden dataset evaluation metrics
+│   │   ├── observability.py       # Distributed tracing & metrics logging
+│   │   ├── pipeline.py            # End-to-end RAG pipeline coordinator
+│   │   ├── cli.py                 # Backend CLI interface
+│   │   └── config.py              # Centralized configuration dataclass
+│   ├── data/                      # Tenant data, indices, and cache persistence
+│   ├── logs/                      # Observability traces and metrics logs
+│   ├── requirements.txt           # Backend-specific dependencies
+│   └── __init__.py
+├── frontend/
+│   ├── app.py                     # Streamlit frontend application
+│   ├── ui/                        # UI stylesheet and custom assets
+│   │   └── style.css
+│   ├── legacy/                    # Legacy single-file application archive
+│   │   └── main_legacy.py
+│   ├── requirements.txt           # Frontend dependencies
+│   └── __init__.py
+├── tests/
+│   ├── test_rag.py                # Unit and integration test suite
+│   ├── conftest.py                # Pytest configuration and path resolution
+│   ├── test_data/                 # Fixtures and evaluation datasets
+│   │   ├── eval.jsonl
+│   │   └── widgets.md
+│   └── __init__.py
+├── docs/
+│   ├── rag_end2end_notes.md       # Architecture & engineering notes
+│   └── rag_end2end_notes.pdf      # PDF export of engineering notes
+├── .github/
+│   └── workflows/
+│       └── rag_test.yml           # CI workflow (pytest across Python versions)
+├── main.py                        # Unified launcher entry point
+├── requirements.txt               # Unified project dependencies
+└── README.md
+```
+
+---
+
+## 🚀 Quick Start
+
+### 1. Installation
+
+Using `uv` (recommended):
+```bash
+uv sync
+```
+Or using `pip`:
 ```bash
 pip install -r requirements.txt
-export HUGGINGFACE_HUB_TOKEN=hf_...        # or .env / st.secrets
-streamlit run main.py
-
-RAG_OFFLINE=1 streamlit run main.py        # stub embedder + extractive LLM: no models, no key
-python -m rag.cli --offline ingest tests/data/widgets.md
-python -m rag.cli --offline ask "How long is the warranty period?"
-python -m rag.cli --offline eval tests/data/eval.jsonl --name base
-python -m rag.cli --offline eval tests/data/eval.jsonl --name new --baseline reports/base.json   # exit 1 on regression
-pytest -q
 ```
 
-## Layer map
+### 2. Run the Streamlit Web Application
 
-| Layer | Module | What it does |
+```bash
+# Using uv:
+uv run streamlit run frontend/app.py
+
+# Or using python3 / virtualenv:
+python3 -m streamlit run frontend/app.py
+
+# Offline demo mode (model-free):
+RAG_OFFLINE=1 uv run streamlit run frontend/app.py
+```
+
+### 3. Backend CLI
+
+```bash
+# Ingest documents
+uv run python -m backend.rag.cli --offline ingest tests/test_data/widgets.md
+
+# Ask questions
+uv run python -m backend.rag.cli --offline ask "How long is the warranty period?"
+
+# Run evaluation suite
+uv run python -m backend.rag.cli --offline eval tests/test_data/eval.jsonl --name base
+```
+
+### 4. Running Tests
+
+```bash
+uv run pytest -v
+```
+
+---
+
+## 🏗️ Architecture & Layer Map
+
+| Layer | Module | Description |
 |---|---|---|
-| 1 Ingestion | `ingestion.py`, `chunking.py`, `embeddings.py`, `store.py` | pdf/docx/txt/md/csv parsing, boilerplate removal, metadata (title, year, tenant, owner, roles, version), heading-tree extraction. **Structure-aware parent-child chunking**: sections become parents (tiny siblings merged, huge ones split); sentence-packed children (~500 chars, 1-sentence overlap; tables/code atomic) are embedded as `Section > Path` + text; the LLM receives parents. FAISS (numpy fallback) + BM25, incremental and versioned per tenant. |
-| 2 Query understanding | `query.py`, `retrieval.py` | normalization, follow-up rewriting from memory, decomposition, metadata-filter extraction (relaxed if it matches nothing), dense + BM25 run concurrently, RRF fusion, cross-encoder rerank, answerability gate. |
-| 3 Context | `context.py` | dedup (exact / cosine / Jaccard) → MMR diversity → parent expansion → extractive compression → token budget → ordering (document / edges / relevance) → `S1..Sn` labels. |
-| 4 Generation | `generation.py`, `llm.py` | XML-delimited prompt, canary token, `NO_ANSWER` abstention, streaming with a gate so abstentions never flash, citation parsing/validation (unknown labels stripped). |
-| 5 Verification | `verification.py` | atomic claim extraction, sentence-level evidence matching, NLI (lexical+embedding fallback), numeric check, citation accuracy, groundedness, one self-correction retry, abstain below threshold. |
-| 7 Memory | `memory.py` | short-term turns, semantic recall of older turns, rolling summarization with archive, long-term facts (PII-redacted, injection-filtered); isolated per (tenant, user). |
-| 8 Caching | `cache.py` | sqlite-backed LRU for embeddings, retrieval and LLM calls, plus a semantic answer cache scoped by tenant+roles+filters. Versioned keys (index version, embedder, prompt, LLM, memory facts) invalidate automatically. |
-| 9 Security | `security.py` | upload validation (magic bytes, PDF active content, zip-bomb ratio, macros), prompt and indirect-injection scan/neutralize, PII redaction, tenant isolation + role ACL, constant-time token auth, token-bucket rate limits. |
-| 10 Evaluation | `evaluation.py`, `cli.py` | Recall/Precision/Hit@K, MRR, NDCG; context precision/recall/redundancy; correctness, groundedness, citation accuracy, abstention accuracy; latency/cost. JSON report with config snapshot; `compare_reports` for regression checks. |
-| 11 Observability | `observability.py` | per-request trace (spans, counters, events, errors), per-stage latency, retrieval logging, cost, failure rate; `MetricsStore` writes PII-redacted jsonl. |
+| **1 Ingestion** | `ingestion.py`, `chunking.py`, `embeddings.py`, `store.py` | PDF/DOCX/TXT/MD/CSV parsing, boilerplate stripping, metadata extraction. **Structure-aware parent-child chunking**: sections form parents, sentence-packed children embedded with heading paths. FAISS dense + BM25 sparse hybrid index. |
+| **2 Query Understanding** | `query.py`, `retrieval.py` | Normalization, conversational query rewriting, sub-query decomposition, metadata filter extraction, RRF (Reciprocal Rank Fusion), and Cross-Encoder reranking. |
+| **3 Context Engine** | `context.py` | Deduplication (Exact / Cosine / Jaccard) → MMR diversity → parent expansion → extractive compression → token budget optimization → `[S1]..[Sn]` citation labeling. |
+| **4 Generation** | `generation.py`, `llm.py` | XML-delimited prompt formatting, canary token protection, `NO_ANSWER` abstention, and token-streaming gate. |
+| **5 Verification** | `verification.py` | Atomic claim extraction, evidence matching, NLI (Natural Language Inference) entailment checking, numeric consistency check, and groundedness scoring. |
+| **6 Memory** | `memory.py` | Short-term conversation history, semantic recall of older turns, rolling summarization, and PII-redacted long-term fact extraction. |
+| **7 Caching** | `cache.py` | SQLite-backed LRU cache for embeddings, retrieval results, and LLM responses, plus semantic answer caching. |
+| **8 Security** | `security.py` | Upload file validation (magic bytes, active content, zip bomb checks), prompt injection neutralization, PII redaction, and rate-limiting. |
+| **9 Evaluation** | `evaluation.py`, `cli.py` | Recall, Precision, MRR, NDCG, groundedness, citation accuracy, and automated regression comparison. |
+| **10 Observability** | `observability.py` | Per-request tracing (spans, events, timings), stage latency metrics, and PII-safe JSONL log export. |
 
-## Configuration
-All knobs live in `rag/config.py` (`RAGConfig`) and can be overridden with `RAG_<FIELD>` environment variables (models, chunk sizes, k's, thresholds, token budgets, rate limits).
+---
 
-## Auth
-Without `RAG_AUTH_TOKENS` the UI runs as a single local user. To require login, set
-`RAG_AUTH_TOKENS='{"<token>": {"tenant": "acme", "user": "alice", "roles": ["member"]}}'`. Authentication proves who you are; authorization (tenant + role ACL) is enforced inside the store on every query.
+## ⚙️ Configuration
 
-## Eval dataset format (JSONL)
-```json
-{"id":"q1","question":"...","expected_answer":"...","answerable":true,
- "relevant":[{"filename":"paper.pdf","page":12,"contains":"Adam","grade":3}]}
-```
-Set `"answerable": false` to test abstention.
-
-## Notes
-- The offline hash embedder and `FakeLLM` (`rag/testing.py`) are test doubles. Quality numbers from `--offline` runs only check the plumbing.
-- `main_legacy.py` is the original single-file app, kept for reference.
+All configuration settings are defined in [`backend/rag/config.py`](backend/rag/config.py) (`RAGConfig`) and can be dynamically overridden via environment variables prefixed with `RAG_` (e.g. `RAG_LLM_MODEL`, `RAG_MAX_CONTEXT_ITEMS`, `RAG_DENSE_K`).

@@ -6,9 +6,11 @@ Memory, caching, security, evaluation and observability sit around that chain.
 """
 from __future__ import annotations
 
+import hashlib
 import logging
 import os
 from dataclasses import asdict
+from pathlib import Path
 from typing import Iterator
 
 from .cache import KVCache, SemanticCache
@@ -28,6 +30,17 @@ from .store import Store
 from .types import Answer, Principal
 from .utils import sha, stable_json
 from .verification import NLIModel, Verifier
+
+BUILTIN_DIR = Path(__file__).parent / "builtin"
+SYSTEM_TENANT = "__system__"
+
+# Small-talk intent -> direct reply (never goes through retrieval)
+_SMALL_TALK_REPLIES: dict[str, str] = {
+    "greeting": "Hello! How can I help you with your documents?",
+    "casual": "I'm doing well, thanks! What would you like to know about your documents?",
+    "gratitude": "You're welcome!",
+    "farewell": "Goodbye! Feel free to come back whenever you have questions.",
+}
 
 
 class RAGPipeline:
@@ -53,6 +66,54 @@ class RAGPipeline:
         self.memory = MemoryManager(cfg, self.embedder, self.llm)
         self.limiter = RateLimiter({"query": cfg.query_rate_per_min, "upload": cfg.upload_rate_per_min})
         self.metrics = MetricsStore(cfg.log_dir, cfg)
+        self.ensure_builtin_documents()
+
+    # builtin system documents
+    def ensure_builtin_documents(self) -> None:
+        """Index built-in documents (e.g. HOW_TO_USE.md) under the __system__ tenant.
+        Idempotent: only re-indexes when file content changes (SHA-256 hash check)."""
+        if not BUILTIN_DIR.exists():
+            return
+        system_index = self.store.get(SYSTEM_TENANT)
+        for path in BUILTIN_DIR.glob("*.md"):
+            try:
+                content = path.read_bytes()
+                content_hash = hashlib.sha256(content).hexdigest()
+                # Check if already indexed with same hash
+                existing = system_index.find_by_filename(path.name)
+                if existing and existing.get("content_hash") == content_hash:
+                    continue  # unchanged
+                self._ingest_system_document(path.name, content, content_hash)
+                logging.getLogger("rag").info("builtin: indexed %s (hash %s)", path.name, content_hash[:12])
+            except Exception as e:
+                logging.getLogger("rag").warning("builtin: failed to index %s: %s", path.name, e)
+
+    def _ingest_system_document(self, filename: str, content: bytes, content_hash: str) -> None:
+        """Ingest a system document under the __system__ tenant with public visibility."""
+        system_principal = Principal(SYSTEM_TENANT, "system", ("system",))
+        tr = Trace("ingest_builtin", system_principal)
+        set_trace(tr)
+        try:
+            parsed, _ = parse_document(filename, content, system_principal, self.cfg)
+            # Override metadata: system doc, visible to all users
+            parsed.meta.update(
+                source_type="system",
+                visibility="public",
+                content_hash=content_hash,
+            )
+            index = self.store.get(SYSTEM_TENANT)
+            old = index.find_by_filename(filename)
+            parents, children = chunk_document(parsed, self.cfg)
+            version = (old.get("version", 1) + 1) if old else 1
+            parsed.meta.update(version=version, n_chunks=len(children), n_parents=len(parents))
+            for c in children:
+                c.meta.update(version=version, source_type="system", visibility="public")
+            vecs = self.embedder.embed_documents([c.embed_text for c in children])
+            if old:
+                index.remove_document(old["doc_id"])
+            index.add_document(parsed.meta, parents, children, vecs)
+        finally:
+            set_trace(None)
 
     # ingest
     def ingest(self, principal: Principal, files: list, allowed_roles: list | None = None) -> list:
@@ -112,6 +173,21 @@ class RAGPipeline:
         return {"documents": len(self.list_documents(principal)), "chunks": len(idx), "parents": len(idx.parents),
                 "index_version": idx.version, "metrics": self.metrics.summary()}
 
+    def get_facts(self, principal: Principal) -> list[str]:
+        return [f["text"] for f in self.memory.facts(principal)]
+
+    def clear_facts(self, principal: Principal) -> None:
+        self.memory.clear(principal)
+
+    def clear_memory(self, principal: Principal, session_id: str | None = None) -> None:
+        self.memory.clear(principal)
+
+    def clear_caches(self) -> None:
+        if self.cache:
+            self.cache.clear()
+        if self.sem_cache:
+            self.sem_cache.clear()
+
     #  retrieval only
     def retrieve_only(self, principal: Principal, question: str, history: list | None = None):
         """Plan + retrieve (no generation). Used by evaluation to score retrieval in isolation."""
@@ -167,23 +243,50 @@ class RAGPipeline:
         question = normalize_query(question, cfg.max_question_chars)
         if not question:
             return self._abstain("Please enter a question.", "empty question")
-        index = self.store.get(principal.tenant_id)
-        if not self.list_documents(principal):
-            return self._abstain("No documents are indexed for you yet. Upload some first.", "no documents")
 
         yield {"type": "status", "stage": "understanding"}
+
+        # --- Conversation routing gate ---
+        # Small-talk is classified deterministically (no LLM, no retrieval).
+        from .query import detect_small_talk  # local import to avoid circular at module level
+        st = detect_small_talk(question)
+        if st in _SMALL_TALK_REPLIES:
+            reply = _SMALL_TALK_REPLIES[st]
+            ans = Answer(reply, abstained=False)
+            yield {"type": "final", "answer": ans}
+            return ans
+
+        # --- Normal RAG path ---
+        index = self.store.get(principal.tenant_id)
+        system_index = self.store.get(SYSTEM_TENANT)
+        has_user_docs = bool(self.list_documents(principal))
+
         self.memory.maybe_store_facts(principal, question)           # long-term memory write
         history = self.memory.recent_turns(principal, session_id)    # short-term memory
-        plan = self.query.plan(question, history, index.known_meta(principal))
+
+        # known_meta merges user docs + system docs for filter extraction
+        from .types import Principal as _P
+        _sys = _P(SYSTEM_TENANT, "system", ("system",))
+        merged_known = index.known_meta(principal)
+        if system_index:
+            sys_known = system_index.known_meta(_sys)
+            merged_known["filenames"] = merged_known["filenames"] + sys_known["filenames"]
+        plan = self.query.plan(question, history, merged_known)
         if filters:
             plan.filters = {**plan.filters, **filters}
+
+        # Help queries get a source_type hint so system docs are prioritised
+        if plan.intent == "help" and not plan.filters.get("source_type"):
+            plan.filters["source_type"] = ["system", "user"]
+
         yield {"type": "plan", "plan": asdict(plan)}
         mem = self.memory.retrieve(principal, session_id, plan.rewritten)   # semantic + long-term + summary
 
-        #  semantic cache (scoped by tenant+roles+filters; versioned) 
+        #  semantic cache (scoped by tenant+roles+filters; versioned)
         qvec = self.embedder.embed_query(plan.rewritten)
         scope = f"{principal.tenant_id}|{sha(*sorted(principal.roles), n=8)}|{sha(stable_json(plan.filters), n=8)}"
-        versions = sha(index.version, self.embedder.name, PROMPT_VERSION, self.llm.name, mem.facts_hash, n=16)
+        sys_ver = system_index.version if system_index else ""
+        versions = sha(index.version, sys_ver, self.embedder.name, PROMPT_VERSION, self.llm.name, mem.facts_hash, n=16)
         if self.sem_cache:
             hit = self.sem_cache.get(scope, qvec, versions)
             if hit is not None:
@@ -193,8 +296,30 @@ class RAGPipeline:
                 return ans
 
         yield {"type": "status", "stage": "retrieving"}
+        # Retrieve from user index; for help/factual also search system index and merge hits
         res = self.retriever.retrieve(principal, plan)
-        if not self.retriever.is_answerable(res):   # answerability gate: abstain BEFORE spending an LLM call
+        # Merge system index hits only for help queries — never for factual document queries
+        if plan.intent == "help" and len(system_index) > 0:
+            sys_res = self.retriever.retrieve_system(plan)
+            if sys_res and sys_res.hits:
+                from .types import Hit  # noqa: F401
+                merged_hits = {h.chunk_id: h for h in res.hits}
+                for h in sys_res.hits:
+                    if h.chunk_id not in merged_hits:
+                        merged_hits[h.chunk_id] = h
+                res.hits = sorted(merged_hits.values(), key=lambda h: -h.score)
+                if not res.hits or res.strength == 0.0:
+                    # If user retrieval was empty, adopt system result strength
+                    res.strength = sys_res.strength
+                    res.kind = sys_res.kind
+
+        # Guard: require user docs for non-help queries; help can fall through to system docs
+        if not has_user_docs and plan.intent not in ("help",):
+            ans = self._abstain("No documents are indexed for you yet. Upload some first.", "no user documents", plan)
+            self.memory.record_turn(principal, session_id, question, ans.text)
+            return ans
+
+        if not self.retriever.is_answerable(res):
             ans = self._abstain("I couldn't find anything in your documents that answers this.",
                                 f"retrieval evidence too weak ({res.kind} score {res.strength:.3f})", plan)
             self.memory.record_turn(principal, session_id, question, ans.text)

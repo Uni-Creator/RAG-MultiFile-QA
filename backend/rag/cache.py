@@ -74,6 +74,12 @@ class KVCache:
     def set_vec(self, ns, key, vec: np.ndarray):
         self._set(ns, key, np.asarray(vec, dtype=np.float32).tobytes())
 
+    def clear(self):
+        with self.lock:
+            self.mem.clear()
+            self.db.execute("DELETE FROM kv")
+            self.db.commit()
+
 
 class SemanticCache:
     """Similar queries share an answer - but only inside the same (tenant, roles, filters) scope and
@@ -84,6 +90,10 @@ class SemanticCache:
         self.max = max_per_scope
         self.store: dict = {}
         self.lock = threading.Lock()
+
+    def clear(self):
+        with self.lock:
+            self.store.clear()
 
     def get(self, scope: str, qvec: np.ndarray, versions: str):
         with self.lock:

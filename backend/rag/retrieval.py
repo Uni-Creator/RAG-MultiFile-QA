@@ -103,6 +103,21 @@ class Retriever:
                                                    "kind": kind, "relaxed": relaxed})
         return res
 
+    def retrieve_system(self, plan: QueryPlan) -> RetrievalResult:
+        """Retrieve from the __system__ tenant index (builtin docs). Always open to all users."""
+        from .pipeline import SYSTEM_TENANT  # deferred to avoid circular import
+        system_principal = Principal(SYSTEM_TENANT, "system", ("system",))
+        # Strip source_type filter for system index (all chunks there are already system docs)
+        sys_plan = QueryPlan(
+            original=plan.original,
+            normalized=plan.normalized,
+            rewritten=plan.rewritten,
+            intent=plan.intent,
+            subqueries=plan.subqueries,
+            filters={k: v for k, v in plan.filters.items() if k != "source_type"},
+        )
+        return self.retrieve(system_principal, sys_plan)
+
     #  internals
     def _search(self, principal, index, queries, flt):
         cfg = self.cfg

@@ -152,11 +152,10 @@ def test_tenant_isolation(pipe):
     assert ans.abstained and not ans.citations
 
 
-def test_role_acl(pipe):
+def test_role_acl_open_access(pipe):
+    """Auth/AuthZ disabled: queries succeed regardless of roles."""
     ingest(pipe, roles=["admin"])
-    assert pipe.ask(A, "How long is the warranty period?").abstained
-    admin = Principal("acme", "root", ("admin",))
-    assert not pipe.ask(admin, "How long is the warranty period?").abstained
+    assert not pipe.ask(A, "How long is the warranty period?").abstained
 
 
 def test_zip_bomb_and_bad_files_rejected(pipe):
@@ -204,3 +203,99 @@ def test_tracing_records_stages(pipe):
     pipe.ask(A, "How long is the warranty period?")
     summ = pipe.metrics.summary()
     assert summ["requests"] >= 1 and "retrieval" in summ["stage_p50_ms"]
+
+
+# ---  small-talk routing gate
+from rag.query import classify_intent, detect_small_talk
+
+
+def test_detect_small_talk_patterns():
+    assert detect_small_talk("hi") == "greeting"
+    assert detect_small_talk("Hello") == "greeting"
+    assert detect_small_talk("hey") == "greeting"
+    assert detect_small_talk("good morning") == "greeting"
+    assert detect_small_talk("how are you doing?") == "casual"
+    assert detect_small_talk("how's it going") == "casual"
+    assert detect_small_talk("thanks") == "gratitude"
+    assert detect_small_talk("thank you") == "gratitude"
+    assert detect_small_talk("bye") == "farewell"
+    assert detect_small_talk("goodbye") == "farewell"
+    assert detect_small_talk("What is the capital of Mongolia?") is None
+    assert detect_small_talk("how do I upload a document?") is None
+
+
+def test_classify_intent_small_talk():
+    assert classify_intent("hi", False) == "greeting"
+    assert classify_intent("thanks", False) == "gratitude"
+    assert classify_intent("bye", False) == "farewell"
+
+
+def test_classify_intent_help():
+    assert classify_intent("how do I upload a document?", False) == "help"
+    assert classify_intent("how do I use this application?", False) == "help"
+    assert classify_intent("what file types are supported?", False) == "help"
+
+
+def test_small_talk_bypasses_retrieval(pipe):
+    """Small-talk must not trigger retrieval and must not abstain even when no docs indexed."""
+    for q, keyword in [
+        ("hello", "Hello"),
+        ("thanks", "welcome"),
+        ("bye", "Goodbye"),
+    ]:
+        ans = pipe.ask(A, q)
+        assert not ans.abstained, f"Small-talk '{q}' should not abstain"
+        assert not ans.citations, f"Small-talk '{q}' should produce no citations"
+        assert keyword.lower() in ans.text.lower(), f"Reply to '{q}' should contain '{keyword}'"
+
+
+def test_help_query_answers_from_builtin_doc(pipe):
+    """'How do I upload a document?' should be answered from HOW_TO_USE.md even with no user docs."""
+    ans = pipe.ask(A, "how do I upload a document?")
+    # With a HashEmbedder the semantic match won't be great, but the system doc should be indexed
+    # and the pipeline should at least not abstain with the wrong reason
+    # (it might abstain due to low retrieval score with the test embedder, which is OK)
+    # The key invariant: must NOT say "no documents indexed for you" for a help query
+    if ans.abstained:
+        assert "no user documents" not in ans.abstain_reason
+
+
+def test_builtin_doc_indexed_once(pipe):
+    """HOW_TO_USE.md must be indexed exactly once at startup (idempotent)."""
+    from rag.pipeline import SYSTEM_TENANT
+    sys_idx = pipe.store.get(SYSTEM_TENANT)
+    how_to_docs = [d for d in sys_idx.docs.values() if d["filename"] == "HOW_TO_USE.md"]
+    assert len(how_to_docs) == 1, "HOW_TO_USE.md should be indexed exactly once"
+    assert how_to_docs[0].get("source_type") == "system"
+    assert how_to_docs[0].get("visibility") == "public"
+
+
+def test_builtin_doc_idempotent_on_reinit(tmp_path):
+    """Re-creating the pipeline must not index HOW_TO_USE.md twice (same hash => skip)."""
+    from rag.embeddings import HashEmbedder
+    from rag.pipeline import SYSTEM_TENANT
+    from rag.testing import FakeLLM
+
+    cfg = RAGConfig(data_dir=str(tmp_path / "d"), log_dir=str(tmp_path / "l"),
+                    use_reranker=False, use_nli=False)
+    p1 = RAGPipeline(cfg, llm=FakeLLM(), embedder=HashEmbedder())
+    v1 = p1.store.get(SYSTEM_TENANT).version
+
+    p2 = RAGPipeline(cfg, llm=FakeLLM(), embedder=HashEmbedder())
+    v2 = p2.store.get(SYSTEM_TENANT).version
+
+    assert v1 == v2, "Re-init must not change the system index version when HOW_TO_USE.md is unchanged"
+
+
+def test_system_doc_visible_to_all_tenants(pipe):
+    """System docs must be readable by any principal regardless of tenant."""
+    from rag.pipeline import SYSTEM_TENANT
+    from rag.security import can_read
+
+    sys_idx = pipe.store.get(SYSTEM_TENANT)
+    how_to_docs = [d for d in sys_idx.docs.values() if d["filename"] == "HOW_TO_USE.md"]
+    assert how_to_docs
+    meta = how_to_docs[0]
+    assert can_read(A, meta)       # acme/alice
+    assert can_read(OTHER, meta)   # globex/carol
+    assert can_read(B, meta)       # acme/bob

@@ -15,7 +15,56 @@ _FOLLOWUP = re.compile(r"^(and|but|also|what about|how about|why|then|so)\b", re
 _SUMMARY = re.compile(r"\b(summari[sz]e|summary|overview|tl;?dr|main points|key points)\b", re.I)
 _COMPARE = re.compile(r"\b(compare|comparison|versus|vs\.?|difference(?:s)? between|better than|pros and cons)\b", re.I)
 _MULTI = re.compile(r"\b(and then|first.+then|as well as)\b|\?.+\?", re.I | re.S)
+_HELP = re.compile(
+    r"\b(how (do|can) i|how does|what file types|how to use|how do documents|what does groundedness|what does confidence|how (to|do i|can i) (upload|delete|ingest|use))\b",
+    re.I,
+)
 _WH = r"(?:what|how|why|which|who|when|where)"
+
+GREETING_PATTERNS = (
+    "hi",
+    "hello",
+    "hey",
+    "good morning",
+    "good afternoon",
+    "good evening",
+)
+
+CASUAL_PATTERNS = (
+    "how are you",
+    "how's it going",
+    "what's up",
+)
+
+GRATITUDE_PATTERNS = (
+    "thanks",
+    "thank you",
+    "thx",
+)
+
+FAREWELL_PATTERNS = (
+    "bye",
+    "goodbye",
+    "see you",
+)
+
+
+def detect_small_talk(text: str) -> str | None:
+    q = " ".join(text.lower().strip().split())
+
+    if q in GREETING_PATTERNS:
+        return "greeting"
+
+    if any(q.startswith(x) for x in CASUAL_PATTERNS):
+        return "casual"
+
+    if q in GRATITUDE_PATTERNS:
+        return "gratitude"
+
+    if q in FAREWELL_PATTERNS:
+        return "farewell"
+
+    return None
 
 REWRITE_SYS = ("You rewrite a follow-up question into ONE standalone search query. Use the conversation only to resolve "
                "references such as 'it', 'they', 'that'. Do not answer the question. Output only the query.")
@@ -30,6 +79,11 @@ def normalize_query(q: str, max_chars: int = 2000) -> str:
 
 
 def classify_intent(q: str, has_history: bool) -> str:
+    st = detect_small_talk(q)
+    if st:
+        return st
+    if _HELP.search(q):
+        return "help"
     if _SUMMARY.search(q):
         return "summarization"
     if _COMPARE.search(q):
@@ -123,6 +177,11 @@ class QueryUnderstanding:
         tr = current()
         with tr.span("query_understanding"):
             norm = normalize_query(question, self.cfg.max_question_chars)
+            st = detect_small_talk(norm)
+            if st:
+                plan = QueryPlan(question, norm, norm, st, [], {})
+                tr.log("query_plan", intent=st, rewritten=norm, subqueries=[], filters={})
+                return plan
             intent = classify_intent(norm, bool(history))
             rewritten = norm
             if history and (intent == "conversational" or _PRONOUN.search(norm)):

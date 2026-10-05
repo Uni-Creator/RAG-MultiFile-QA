@@ -147,6 +147,11 @@ class TenantIndex:
     def parent(self, parent_id: str) -> Parent:
         return self.parents[parent_id]
 
+    def list_documents(self, principal: Principal | None = None) -> list:
+        if principal is not None:
+            return [d for d in self.docs.values() if can_read(principal, d)]
+        return list(self.docs.values())
+
     def known_meta(self, principal: Principal) -> dict:
         docs = [d for d in self.docs.values() if can_read(principal, d)]
         return {"filenames": [d["filename"] for d in docs],
@@ -187,6 +192,9 @@ def matches(meta: dict, flt: dict | None) -> bool:
         return True
     for key, cond in flt.items():
         val = meta.get(key)
+        # source_type defaults to "user" for documents that pre-date the field
+        if key == "source_type" and val is None:
+            val = "user"
         if isinstance(cond, dict):
             if "gte" in cond and (val is None or val < cond["gte"]):
                 return False
